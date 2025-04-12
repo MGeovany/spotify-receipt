@@ -22,29 +22,41 @@ export async function GET(request: NextRequest) {
 
     // Check if token has expired
     if (new Date(user.token_expires_at) <= new Date()) {
+      console.log('Token expired, attempting refresh...');
       // Refresh the token
       try {
-        const refreshResponse = await refreshAccessToken(user.spotify_refresh_token)
-        const { access_token, expires_in } = refreshResponse
+        const refreshResponse = await refreshAccessToken(user.spotify_refresh_token);
+        const { access_token, expires_in } = refreshResponse;
+        
+        console.log('Token refreshed successfully');
 
         // Calculate new expiration date
-        const expiresAt = new Date()
-        expiresAt.setSeconds(expiresAt.getSeconds() + expires_in)
+        const expiresAt = new Date();
+        expiresAt.setSeconds(expiresAt.getSeconds() + expires_in);
 
         // Update user with new token
-        await supabase
+        const { error: updateError } = await supabase
           .from("users")
           .update({
             spotify_access_token: access_token,
             token_expires_at: expiresAt.toISOString(),
             updated_at: new Date().toISOString(),
           })
-          .eq("id", user.id)
+          .eq("id", user.id);
 
-        user.spotify_access_token = access_token
+        if (updateError) {
+          console.error('Error updating user with new token:', updateError);
+          throw updateError;
+        }
+
+        user.spotify_access_token = access_token;
+        console.log('User token updated in database');
       } catch (error) {
-        return NextResponse.redirect(new URL("/auth/error?error=token_refresh_failed", request.nextUrl.origin))
+        console.error('Token refresh failed:', error);
+        return NextResponse.redirect(new URL("/auth/error?error=token_refresh_failed", request.nextUrl.origin));
       }
+    } else {
+      console.log('Token still valid, expires at:', user.token_expires_at);
     }
 
     // Fetch top tracks for multiple time ranges
@@ -74,12 +86,11 @@ export async function GET(request: NextRequest) {
 
       // Fetch audio features for these tracks
       const trackIds = topTracksResponse.items.map((track: any) => track.id)
-      const audioFeaturesResponse = await getAudioFeatures(user.spotify_access_token, trackIds)
+      const audioFeatures = await getAudioFeatures(user.spotify_access_token, trackIds)
 
-      if (audioFeaturesResponse.audio_features) {
+      if (audioFeatures.length > 0) {
         // Calculate average audio features
-        const features = audioFeaturesResponse.audio_features.filter(Boolean)
-        const avgFeatures = features.reduce(
+        const avgFeatures = audioFeatures.reduce(
           (acc: any, feature: any) => {
             acc.danceability += feature.danceability
             acc.energy += feature.energy
@@ -96,16 +107,20 @@ export async function GET(request: NextRequest) {
             tempo: 0,
             acousticness: 0,
             instrumentalness: 0,
-          },
+          }
         )
 
-        const count = features.length
+        const count = audioFeatures.length
         Object.keys(avgFeatures).forEach((key) => {
           avgFeatures[key] = avgFeatures[key] / count
         })
 
         // Delete existing audio features first
-        await supabase.from("user_audio_features").delete().eq("user_id", user.id).eq("time_range", timeRange)
+        await supabase
+          .from("user_audio_features")
+          .delete()
+          .eq("user_id", user.id)
+          .eq("time_range", timeRange)
 
         // Store audio features
         await supabase.from("user_audio_features").insert({
